@@ -1,0 +1,743 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Project Notes — NYC Taxi Medallion Pipeline</title>
+<style>
+  :root {
+    --bg:#0f1116; --panel:#161a22; --panel2:#1c2230; --text:#e6e9ef; --muted:#a3adbf;
+    --accent:#4da3ff; --accent2:#7ee0a5; --border:#2a3242; --code:#0b0d12;
+    --bronze:#c98a4b; --silver:#9aa7b4; --gold:#e0b64a;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg:#ffffff; --panel:#f6f8fa; --panel2:#eef2f6; --text:#1b1f24; --muted:#57606a;
+      --accent:#0969da; --accent2:#1a7f37; --border:#d0d7de; --code:#f6f8fa;
+    }
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; background:var(--bg); color:var(--text);
+    font:16px/1.7 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, Helvetica, Arial, sans-serif;
+  }
+  .wrap { max-width:960px; margin:0 auto; padding:48px 24px 96px; }
+  h1 { font-size:2.1rem; line-height:1.25; margin:0 0 .4em; letter-spacing:-.02em; }
+  h2 {
+    font-size:1.5rem; margin:2.4em 0 .6em; padding-bottom:.35em;
+    border-bottom:2px solid var(--border); letter-spacing:-.01em;
+  }
+  h3 { font-size:1.15rem; margin:1.9em 0 .5em; color:var(--accent); }
+  h4 { font-size:1rem; margin:1.4em 0 .4em; color:var(--muted); }
+  p, li { color:var(--text); }
+  a { color:var(--accent); text-decoration:none; }
+  a:hover { text-decoration:underline; }
+  blockquote {
+    margin:1.4em 0; padding:.9em 1.2em; background:var(--panel);
+    border-left:4px solid var(--accent); border-radius:0 8px 8px 0; color:var(--muted);
+  }
+  blockquote strong { color:var(--text); }
+  code {
+    font-family:"SF Mono", ui-monospace, Menlo, Consolas, monospace; font-size:.88em;
+    background:var(--panel2); padding:.15em .4em; border-radius:5px;
+  }
+  pre {
+    background:var(--code); border:1px solid var(--border); border-radius:10px;
+    padding:16px 18px; overflow-x:auto; line-height:1.55;
+  }
+  pre code { background:none; padding:0; font-size:.85rem; }
+  table {
+    width:100%; border-collapse:collapse; margin:1.3em 0;
+    background:var(--panel); border-radius:10px; overflow:hidden; font-size:.94rem;
+  }
+  th, td { padding:10px 14px; text-align:left; border-bottom:1px solid var(--border); vertical-align:top; }
+  th { background:var(--panel2); font-weight:600; }
+  tr:last-child td { border-bottom:none; }
+  hr { border:none; border-top:1px solid var(--border); margin:2.6em 0; }
+  .mermaid {
+    background:var(--panel); border:1px solid var(--border); border-radius:12px;
+    padding:22px; margin:1.6em 0; text-align:center; overflow-x:auto;
+  }
+  ul, ol { padding-left:1.4em; }
+  li { margin:.3em 0; }
+  .banner {
+    background:linear-gradient(135deg,#0b5cab,#5b2c83); color:#fff;
+    padding:26px 28px; border-radius:14px; margin-bottom:2em;
+  }
+  .banner p { color:#dfe7f5; margin:.5em 0 0; }
+  @media print {
+    body { background:#fff; color:#000; }
+    .wrap { max-width:none; padding:0; }
+    .mermaid, table, pre { break-inside:avoid; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+<div class="banner">
+  <strong style="font-size:1.15rem">NYC Taxi Medallion Data Pipeline</strong>
+  <p>Azure Data Factory → ADLS Gen2 → Databricks (Bronze / Silver / Gold Delta Lake) → SQL &amp; dashboard</p>
+</div>
+<h1 id="project-notes-how-this-pipeline-actually-works">📓 Project Notes — How This Pipeline Actually Works</h1>
+<blockquote>
+<p><strong>Purpose of this document.</strong> The README says <em>what</em> was built. This says <em>how it works and why</em>, in plain language, so that six months from now — or in an interview — every piece can be explained from memory.</p>
+<p>Read it top to bottom once; after that use the table of contents as a lookup.</p>
+</blockquote>
+<hr />
+<h2 id="table-of-contents">Table of contents</h2>
+<ol>
+<li><a href="#1-the-60-second-version">The 60-second version</a></li>
+<li><a href="#2-the-azure-half--ingestion">The Azure half — ingestion</a></li>
+<li><a href="#3-the-bridge--how-azure-hands-data-to-databricks">The bridge — how Azure hands data to Databricks</a></li>
+<li><a href="#4-the-databricks-half--the-medallion-lakehouse">The Databricks half — the medallion lakehouse</a></li>
+<li><a href="#5-delta-lake--versioning-and-time-travel">Delta Lake — versioning and time travel</a></li>
+<li><a href="#6-serving--sql-and-the-dashboard">Serving — SQL and the dashboard</a></li>
+<li><a href="#7-incident-log--the-data-source-saga">Incident log — the data-source saga</a></li>
+<li><a href="#8-runbook--operating-it">Runbook — operating it</a></li>
+<li><a href="#9-interview-sound-bites">Interview sound bites</a></li>
+<li><a href="#10-glossary">Glossary</a></li>
+</ol>
+<hr />
+<h2 id="1-the-60-second-version">1. The 60-second version</h2>
+<p>The whole project is one sentence:</p>
+<pre><code>Public taxi data on the internet
+   → Azure Data Factory downloads it
+      → ADLS Gen2 stores it raw
+         → Databricks/PySpark refines it (Bronze → Silver → Gold)
+            → SQL + a dashboard answer business questions
+</code></pre>
+<p>Two mental anchors that make everything else make sense:</p>
+<table>
+<thead>
+<tr>
+<th>Component</th>
+<th>Think of it as</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Azure Data Factory (ADF)</strong></td>
+<td>the <strong>worker</strong> — it fetches files and puts them somewhere. It never interprets them.</td>
+</tr>
+<tr>
+<td><strong>ADLS Gen2</strong></td>
+<td>the <strong>warehouse</strong> — shelves where files are stored exactly as they arrived.</td>
+</tr>
+<tr>
+<td><strong>Databricks + PySpark</strong></td>
+<td>the <strong>factory floor</strong> — where raw material is cleaned, assembled, and turned into products.</td>
+</tr>
+<tr>
+<td><strong>SQL / dashboard</strong></td>
+<td>the <strong>shop window</strong> — where people actually consume the result.</td>
+</tr>
+</tbody>
+</table>
+<p>The single most important rule in the design: <strong>ADF moves bytes, Spark interprets them.</strong> Nothing gets parsed, cleaned, or fixed before it has been safely stored in its original form.</p>
+<div class="mermaid">flowchart LR
+    A["🌐 Internet<br/>NYC TLC open data"] --> B["⚙️ ADF<br/><i>the worker</i>"]
+    B --> C[("🏬 ADLS Gen2<br/><i>the warehouse</i>")]
+    C --> D["🏭 Databricks + PySpark<br/><i>the factory floor</i>"]
+    D --> E["🪟 SQL + Dashboard<br/><i>the shop window</i>"]
+
+    classDef net fill:#1f6f43,color:#fff,stroke:none
+    classDef az  fill:#0b5cab,color:#fff,stroke:none
+    classDef dbx fill:#b3541e,color:#fff,stroke:none
+    classDef out fill:#5b2c83,color:#fff,stroke:none
+    class A net
+    class B,C az
+    class D dbx
+    class E out
+</div>
+<hr />
+<h2 id="2-the-azure-half-ingestion">2. The Azure half — ingestion</h2>
+<h3 id="21-the-four-building-blocks-learn-this-and-adf-is-easy">2.1 The four building blocks (learn this and ADF is easy)</h3>
+<p>Everything in Data Factory is one of four things, and they stack in a strict order:</p>
+<pre><code>Linked Service  =  HOW do I connect?        (credentials + address of a system)
+      ↓
+Dataset         =  WHICH data / which path? (a pointer, possibly with &quot;holes&quot;)
+      ↓
+Activity        =  WHAT do I do with it?    (copy it, look it up, loop over it)
+      ↓
+Pipeline        =  the whole orchestrated job
+</code></pre>
+<p>The reason this layering exists: activities never hold credentials or URLs. That indirection is what allowed this project to swap its data source <strong>three times</strong> without ever redesigning the pipeline.</p>
+<div class="mermaid">flowchart TD
+    P["🧩 PIPELINE<br/>pl_ingest_tlc_monthly<br/>parameter: service_type = yellow"]
+
+    P --> A1["🔍 Lookup — lkp_months"]
+    P --> A2["🔁 ForEach — fe_download_months<br/>batchCount = 8"]
+    P --> A3["📄 Copy — cp_zone_lookup"]
+    A2 --> A21["📦 Copy — cp_tlc_to_raw<br/>(runs once per month)"]
+
+    A1 --> D3["📘 DATASET — ds_adls_months_config<br/>fixed: config/months.json"]
+    A21 -->|fills relativeUrl| D1["📗 DATASET — ds_http_tlc_bin<br/>hole: relativeUrl"]
+    A21 -->|fills folderPath + fileName| D2["📙 DATASET — ds_adls_raw_bin<br/>holes: folderPath, fileName"]
+    A3 --> D1
+    A3 --> D2
+
+    D1 --> L1["🔌 LINKED SERVICE — ls_http_nyctlc"]
+    D2 --> L2["🔌 LINKED SERVICE — ls_adls_datalake"]
+    D3 --> L2
+
+    L1 --> X1["🌐 d37ci6vzurychx.cloudfront.net"]
+    L2 --> X2["🏬 stmedallionsajad01 / datalake"]
+
+    classDef pipe fill:#5b2c83,color:#fff,stroke:none
+    classDef act  fill:#8250b5,color:#fff,stroke:none
+    classDef ds   fill:#0b5cab,color:#fff,stroke:none
+    classDef ls   fill:#1f6f43,color:#fff,stroke:none
+    classDef ext  fill:#444,color:#fff,stroke:none
+    class P pipe
+    class A1,A2,A3,A21 act
+    class D1,D2,D3 ds
+    class L1,L2 ls
+    class X1,X2 ext
+</div>
+<hr />
+<h3 id="22-the-azure-resources">2.2 The Azure resources</h3>
+<p><strong>① Resource Group — <code>rg-medallion-demo</code></strong></p>
+<p>The project folder in Azure. It holds every Azure resource so they can be found, billed, and deleted together.</p>
+<pre><code>rg-medallion-demo → Storage Account + Data Factory
+</code></pre>
+<p><em>Note:</em> a resource group's own region only stores its metadata. Resources inside it can live anywhere — which is why this group is registered in East US while everything inside it runs in West US 2.</p>
+<p><strong>② Storage Account — <code>stmedallionsajad01</code></strong></p>
+<p>The actual Azure storage service. One checkbox at creation time changed what it is:</p>
+<pre><code>Storage Account + &quot;Enable hierarchical namespace&quot; ✅  →  ADLS Gen2 (a real data lake)
+Storage Account without it                        →  plain blob storage (a flat bucket)
+</code></pre>
+<p>Hierarchical namespace gives real directories, atomic renames, and POSIX-style permissions — the properties analytics engines like Spark need to treat storage as a filesystem. It <strong>cannot be enabled later</strong>; get it right at creation.</p>
+<p><strong>③ Container — <code>datalake</code></strong></p>
+<p>The top-level bucket inside the storage account. Think of it as the root folder of all project data.</p>
+<pre><code>stmedallionsajad01 → datalake → (config/ … raw/ …)
+</code></pre>
+<p><strong>④ Data Factory — <code>adf-medallion-sajad01</code></strong></p>
+<p>The orchestration service. V2, West US 2, no Git integration (so "Publish all" is what saves work to the live factory).</p>
+<hr />
+<h3 id="23-the-three-files-that-matter">2.3 The three files that matter</h3>
+<p>There are two <em>kinds</em> of files in this project, and keeping them apart is a design decision, not an accident.</p>
+<h4 id="monthsjson-the-instruction-file-config"><code>months.json</code> — the instruction file (config)</h4>
+<pre><code>Location:  datalake → config → months.json
+</code></pre>
+<pre><code class="language-json">[{&quot;month&quot;: &quot;2025-01&quot;}, {&quot;month&quot;: &quot;2025-02&quot;}, … {&quot;month&quot;: &quot;2025-12&quot;}]
+</code></pre>
+<p>Its only job is to tell ADF: <em>"these are the 12 months I want you to download."</em></p>
+<pre><code>months.json → ADF knows which months to ingest
+</code></pre>
+<p>This is the <strong>metadata-driven</strong> pattern. The pipeline holds the <em>logic</em>; this file holds the <em>scope</em>. Want 2026 next year? Add a line to this file — no pipeline change, no redeployment.</p>
+<h4 id="nyc-tlc-monthly-parquet-files-the-main-data">NYC TLC monthly Parquet files — the main data</h4>
+<p>These live on NYC's public CDN. One file per month, ~55 MB, ~3 million trips each, containing pickup/dropoff timestamps, fare, distance, passenger count, and location IDs.</p>
+<pre><code>NYC TLC website → ADF → datalake → raw → tlc → yellow → month=2025-01 → yellow_tripdata_2025-01.parquet
+</code></pre>
+<h4 id="taxi_zone_lookupcsv-the-dictionary-reference-data"><code>taxi_zone_lookup.csv</code> — the dictionary (reference data)</h4>
+<p>The trip files only say <code>PULocationID = 132</code>. That number means nothing on its own. This 265-row file translates it:</p>
+<pre><code>LocationID | Borough   | Zone
+132        | Queens    | JFK Airport
+161        | Manhattan | Midtown Center
+</code></pre>
+<p>So it is a <strong>dimension</strong>: supporting information that gives the facts their meaning. It goes to a different place, on purpose:</p>
+<pre><code>NYC TLC website → ADF → datalake → raw → tlc → reference → taxi_zone_lookup.csv
+</code></pre>
+<p>It sits in <code>reference/</code>, not inside the monthly folders, because it isn't trip data and it changes on a completely different rhythm (almost never).</p>
+<hr />
+<h3 id="24-the-two-connections-linked-services">2.4 The two connections (linked services)</h3>
+<p><strong><code>ls_http_nyctlc</code></strong> — how to reach the source:</p>
+<pre><code>ADF → ls_http_nyctlc → NYC TLC website
+      Base URL       = https://d37ci6vzurychx.cloudfront.net
+      Authentication = Anonymous   (public open data, no key)
+</code></pre>
+<p><strong><code>ls_adls_datalake</code></strong> — how to reach the destination:</p>
+<pre><code>ADF → ls_adls_datalake → your ADLS Gen2 account
+      Authentication = Account key (selected from the subscription)
+</code></pre>
+<p>Now ADF knows both ends of the journey: <code>ls_http_nyctlc</code> = source, <code>ls_adls_datalake</code> = destination.</p>
+<blockquote>
+<p>🏭 <strong>Production note:</strong> the account key would be replaced by the factory's <strong>managed identity</strong> plus a <em>Storage Blob Data Contributor</em> role assignment — then no secret is stored anywhere at all.</p>
+</blockquote>
+<hr />
+<h3 id="25-the-three-datasets">2.5 The three datasets</h3>
+<p>A linked service says <em>"connect to this system."</em> A dataset says <em>"…and this specific data inside it."</em></p>
+<p><strong><code>ds_http_tlc_bin</code></strong> — which file on the website:</p>
+<pre><code>ls_http_nyctlc → ds_http_tlc_bin → a specific TLC file
+
+parameter: relativeUrl   ← left as a &quot;hole&quot;, filled at runtime
+</code></pre>
+<p>So the same dataset produces, one after another:</p>
+<pre><code>/trip-data/yellow_tripdata_2025-01.parquet
+/trip-data/yellow_tripdata_2025-02.parquet
+…
+</code></pre>
+<p><strong><code>ds_adls_raw_bin</code></strong> — where to save it:</p>
+<pre><code>parameters: folderPath, fileName
+
+For January they resolve to:
+   folderPath = raw/tlc/yellow/month=2025-01
+   fileName   = yellow_tripdata_2025-01.parquet
+</code></pre>
+<p><strong><code>ds_adls_months_config</code></strong> — where the instruction file lives:</p>
+<pre><code>datalake → config → months.json
+</code></pre>
+<p>No parameters here: this file never moves.</p>
+<p>Two design points worth remembering:</p>
+<ul>
+<li><strong>Parameter "holes"</strong> — one source dataset serves 12 different downloads; one sink dataset writes any path. Without them you'd need 12 datasets.</li>
+<li><strong>Format is a decision</strong> — source and sink use type <strong>Binary</strong> ("copy the bytes exactly, don't parse"), which enforces raw-zone immutability. Only the control file is type <strong>JSON</strong>, because the Lookup genuinely has to read its contents.</li>
+</ul>
+<hr />
+<h3 id="26-the-activities">2.6 The activities</h3>
+<p><strong>Lookup — <code>lkp_months</code></strong></p>
+<p>Reads the instruction file. That's all.</p>
+<pre><code>months.json → Lookup → [2025-01, 2025-02, …, 2025-12]
+</code></pre>
+<p>It downloads no taxi data. ⚠️ Its "First row only" setting must be <strong>unchecked</strong>, or it returns a single object instead of the whole list.</p>
+<p><strong>ForEach — <code>fe_download_months</code></strong></p>
+<p>Takes that list and repeats the same work for each element:</p>
+<pre><code>2025-01 → Copy
+2025-02 → Copy
+2025-03 → Copy
+   …
+2025-12 → Copy
+</code></pre>
+<p>With <code>batchCount = 8</code>, up to eight months download <strong>simultaneously</strong> — which is why 660 MB lands in ~2–3 minutes instead of ~20.</p>
+<p><strong>Copy — <code>cp_tlc_to_raw</code></strong> (inside the loop)</p>
+<p>The activity that actually moves the big files. One iteration:</p>
+<pre><code>current month = 2025-01
+   → build the URL       → /trip-data/yellow_tripdata_2025-01.parquet
+   → download the file
+   → save it to          → raw/tlc/yellow/month=2025-01/
+</code></pre>
+<p>Its dynamic expressions:</p>
+<pre><code>source URL   @concat('/trip-data/', pipeline().parameters.service_type, '_tripdata_', item().month, '.parquet')
+sink folder  @concat('raw/tlc/', pipeline().parameters.service_type, '/month=', item().month)
+sink file    @concat(pipeline().parameters.service_type, '_tripdata_', item().month, '.parquet')
+</code></pre>
+<p>Where <code>item()</code> = the current element of the loop, and <code>pipeline().parameters.x</code> = a runtime knob. Retry is set to 2, so a transient network failure self-heals instead of failing the run.</p>
+<p><strong>Copy — <code>cp_zone_lookup</code></strong> (standalone, no arrows)</p>
+<p>The zone dictionary doesn't belong in the monthly loop — there's only one of it. So instead of <code>Lookup → ForEach → Copy</code> it's simply:</p>
+<pre><code>NYC website → cp_zone_lookup → datalake/raw/tlc/reference/taxi_zone_lookup.csv
+</code></pre>
+<p>Because it has no incoming arrow, it starts immediately when the pipeline starts and runs <em>in parallel</em> with the whole month loop. (Arrows in ADF mean "wait for that other activity first" — nothing else.)</p>
+<hr />
+<h3 id="27-the-azure-half-in-one-picture">2.7 The Azure half in one picture</h3>
+<pre><code>months.json → Lookup → ForEach month → Copy monthly Parquet → ADLS raw monthly folders
+
+taxi_zone_lookup.csv → Copy once → ADLS reference folder
+</code></pre>
+<p>And the physical result on disk:</p>
+<pre><code>datalake
+├── config
+│   └── months.json
+└── raw
+    └── tlc
+        ├── yellow
+        │   ├── month=2025-01 → yellow_tripdata_2025-01.parquet
+        │   ├── month=2025-02 → yellow_tripdata_2025-02.parquet
+        │   ├── …
+        │   └── month=2025-12 → yellow_tripdata_2025-12.parquet
+        └── reference
+            └── taxi_zone_lookup.csv
+</code></pre>
+<p>That folder naming (<code>month=2025-01</code>) isn't decoration — it's <strong>Hive-style partitioning</strong>. Spark reads those folder names as a real <code>month</code> column later, for free.</p>
+<p><strong>The one connection to remember:</strong></p>
+<pre><code>Linked Service = how to connect → Dataset = which data/path → Activity = what to do → Pipeline = puts them together
+</code></pre>
+<hr />
+<h2 id="3-the-bridge-how-azure-hands-data-to-databricks">3. The bridge — how Azure hands data to Databricks</h2>
+<p>The data is in Azure. The compute is in Databricks (a separate account, a separate cloud). They need an authenticated handshake.</p>
+<pre><code>ADLS raw zone ──(SAS token: read + list only)──▶ Azure Python SDK ──▶ Unity Catalog Volume ──▶ Spark
+</code></pre>
+<p><strong>Why a SAS token?</strong> A <em>Shared Access Signature</em> is a temporary, scoped, expiring credential. Ours grants <strong>read + list on one container</strong>, and nothing else, for one week (<code>sp=rl</code>). Compare that with the storage account key ADF uses: full control, no expiry. Handing Databricks the narrow credential instead of the master key is the principle of least privilege in practice.</p>
+<p><strong>Why copy files into a "Volume" instead of reading the lake directly?</strong> Databricks Free Edition is serverless-only — no cluster Spark configs, no <code>dbutils.fs.mount</code>, no Azure external locations. So the supported free-tier path is: Azure SDK downloads the files into a <strong>Unity Catalog Volume</strong> (governed file storage that Spark can read like a local disk), and Spark reads from there.</p>
+<div class="mermaid">flowchart LR
+    subgraph AZ["☁️ Azure"]
+        L[("ADLS Gen2<br/>raw/tlc/…")]
+    end
+    subgraph DB["🧱 Databricks Free Edition"]
+        SDK["notebook 01<br/>azure-storage-file-datalake"]
+        V["Volume<br/>/Volumes/workspace/tlc_bronze/landing/"]
+        SP["Spark"]
+    end
+    L -->|"SAS: sp=rl"| SDK --> V --> SP
+
+    classDef az fill:#0b5cab,color:#fff,stroke:none
+    classDef db fill:#b3541e,color:#fff,stroke:none
+    class L az
+    class SDK,V,SP db
+</div>
+<blockquote>
+<p>🏭 <strong>Production note:</strong> on a paid Azure Databricks workspace this hop disappears entirely — the container is registered as a Unity Catalog <strong>external location</strong> backed by a managed identity, and Spark reads <code>abfss://</code> paths in place with zero data movement. Same architecture, less plumbing. <em>Knowing where the free tier bends is itself worth explaining in an interview.</em></p>
+</blockquote>
+<p>Note that the copy <strong>mirrors the lake's folder structure</strong> inside the Volume, so the <code>month=</code> partition folders survive the trip and Spark still sees <code>month</code> as a column.</p>
+<hr />
+<h2 id="4-the-databricks-half-the-medallion-lakehouse">4. The Databricks half — the medallion lakehouse</h2>
+<h3 id="41-how-databricks-names-things">4.1 How Databricks names things</h3>
+<p>Unity Catalog uses three levels:</p>
+<pre><code>catalog . schema . table
+workspace . tlc_silver . trips
+</code></pre>
+<p>Created in notebook <code>00</code>:</p>
+<pre><code>workspace
+├── tlc_bronze   (+ Volume &quot;landing&quot; — the file landing area)
+├── tlc_silver
+└── tlc_gold
+</code></pre>
+<h3 id="42-why-three-layers">4.2 Why three layers</h3>
+<p>Each layer is a <strong>contract</strong>. That's what makes this an architecture instead of three scripts:</p>
+<table>
+<thead>
+<tr>
+<th>Layer</th>
+<th>Contract</th>
+<th>Why it exists</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>🥉 <strong>Bronze</strong></td>
+<td>data exactly as it arrived, plus lineage columns. Nothing dropped, nothing fixed.</td>
+<td><strong>Replay.</strong> If a bug is found in silver logic next month, rebuild from bronze — no re-downloading from the source.</td>
+</tr>
+<tr>
+<td>🥈 <strong>Silver</strong></td>
+<td>typed, validated, deduplicated; one row per business key.</td>
+<td><strong>Truth.</strong> One clean dataset everyone downstream shares, instead of each report re-cleaning the data its own way.</td>
+</tr>
+<tr>
+<td>🥇 <strong>Gold</strong></td>
+<td>aggregated and denormalized, shaped to answer questions.</td>
+<td><strong>Consumption.</strong> Analysts and BI tools write simple queries — no joins, no window functions.</td>
+</tr>
+</tbody>
+</table>
+<div class="mermaid">flowchart LR
+    V["📁 Volume<br/>Parquet + CSV files"]
+
+    subgraph BR["🥉 BRONZE — as landed"]
+        B1["trips_raw<br/>~40M rows · all source columns<br/>+ _source_file, _ingested_at<br/>partitioned by month"]
+        B2["zone_lookup_raw<br/>265 rows · all strings"]
+    end
+
+    subgraph SI["🥈 SILVER — cleaned truth"]
+        S1["trips<br/>typed · deduped · enriched<br/>keyed by trip_id (SHA-256)"]
+        S2["dim_zone<br/>zone → borough, name"]
+        S3["🚧 trips_quarantine<br/>rejects + _dq_rule"]
+    end
+
+    subgraph GO["🥇 GOLD — business answers"]
+        G1["daily_borough_revenue<br/>borough × day"]
+        G2["hourly_demand<br/>weekday × hour"]
+        G3["zone_pair_flows<br/>origin × destination"]
+    end
+
+    V --> B1 & B2
+    B1 --> S1
+    B2 --> S2
+    B1 -.->|"fails a DQ rule"| S3
+    S1 & S2 --> G1 & G2 & G3
+
+    classDef vol fill:#444,color:#fff,stroke:none
+    classDef br fill:#8a5a2b,color:#fff,stroke:none
+    classDef si fill:#5a6570,color:#fff,stroke:none
+    classDef go fill:#8a6d1f,color:#fff,stroke:none
+    class V vol
+    class B1,B2 br
+    class S1,S2,S3 si
+    class G1,G2,G3 go
+</div>
+<hr />
+<h3 id="43-bronze-notebook-02_bronze_load">4.3 🥉 Bronze — notebook <code>02_bronze_load</code></h3>
+<p><strong>Job:</strong> get the files into Delta tables <em>without touching the data</em>.</p>
+<pre><code>Volume Parquet files → read → add lineage columns → write Delta table trips_raw
+</code></pre>
+<p>Three things the read does:</p>
+<pre><code class="language-python">.option(&quot;basePath&quot;, …)                                  # makes month= a real column
+.withColumn(&quot;_source_file&quot;, F.col(&quot;_metadata.file_path&quot;))  # WHICH file each row came from
+.withColumn(&quot;_ingested_at&quot;, F.current_timestamp())         # WHEN we processed it
+</code></pre>
+<p><code>_metadata.file_path</code> is a hidden column Spark exposes on every file read — that's <strong>lineage</strong>, and it's the serverless-safe replacement for the old <code>input_file_name()</code>.</p>
+<p>What bronze deliberately does <strong>not</strong> do: no casting, no filtering, no renaming, no fixing. That is the contract.</p>
+<p><strong>Rerun safety:</strong></p>
+<pre><code>if the table exists  → DELETE the current service's slice → append it again
+else                 → create it, partitioned by month
+</code></pre>
+<p>Run the notebook five times, end up with one copy of the data. That property is called <strong>idempotency</strong>, and <code>DELETE</code> (impossible on plain Parquet) is what makes it clean here.</p>
+<p><strong>Partitioning:</strong> 40M rows ÷ 12 months ≈ 3M rows per partition — a healthy size, so month-filtered queries skip 11/12 of the data. (Partitioning a <em>small</em> table would be a mistake; knowing when not to partition matters as much as knowing how.)</p>
+<hr />
+<h3 id="44-silver-notebook-03_silver_transform">4.4 🥈 Silver — notebook <code>03_silver_transform</code></h3>
+<p>The most substantial code in the project. Five distinct moves:</p>
+<pre><code>① cast types + derive features
+② validate → quarantine failures
+③ deduplicate
+④ build a surrogate key
+⑤ MERGE into the target table
+</code></pre>
+<p><strong>① Types and derived features.</strong> Strings and raw columns become real types, and the calculations everyone would otherwise repeat get computed once:</p>
+<pre><code class="language-python">duration_min = (dropoff_ts − pickup_ts) / 60
+mph          = trip_distance / (duration_min / 60)
+tip_pct      = tip_amount / fare_amount        # guarded: only when fare_amount &gt; 0
+pickup_hour, day_of_week, trip_date
+</code></pre>
+<p>The guard on <code>tip_pct</code> matters — an unguarded divide-by-zero produces <code>Infinity</code>, which silently poisons every average downstream.</p>
+<p><strong>② Data quality → quarantine, not silent drops.</strong> Ten domain rules run at once. Any row breaking one is written to <code>trips_quarantine</code>, <strong>tagged with the rule(s) it broke</strong>:</p>
+<pre><code>null_timestamp · dropoff_not_after_pickup · duration_over_12h
+non_positive_distance · distance_over_200mi
+negative_total · total_over_5000
+implausible_speed (&gt;100 mph) · bad_passenger_count · date_outside_2025
+</code></pre>
+<p>A taxi cannot arrive before it departs, travel at 300 mph, or bill $9,000. The important part isn't the rules — it's that rejects are <strong>kept and labelled</strong>. That converts "we lost some rows" into a queryable question:</p>
+<pre><code class="language-sql">SELECT _dq_rule, count(*) FROM workspace.tlc_silver.trips_quarantine GROUP BY _dq_rule;
+</code></pre>
+<p><strong>③ Deduplicate.</strong> A window function keeps exactly one row per business key:</p>
+<pre><code>row_number() OVER (PARTITION BY vendor, pickup_ts, dropoff_ts, PU, DO, total  ORDER BY pickup_ts)  → keep rn = 1
+</code></pre>
+<p><strong>④ Surrogate key.</strong> TLC trip records have <strong>no ID column</strong> — so one is manufactured:</p>
+<pre><code>trip_id = sha2( vendor | pickup_ts | dropoff_ts | pickup_zone | dropoff_zone | total_amount , 256 )
+</code></pre>
+<p>A deterministic hash of the columns that jointly identify a trip. Same trip in, same key out — which is what makes the next step possible.</p>
+<p><strong>⑤ MERGE — the idempotency guarantee.</strong></p>
+<pre><code class="language-sql">MERGE INTO trips AS t USING batch AS s ON t.trip_id = s.trip_id
+WHEN MATCHED     THEN UPDATE SET *
+WHEN NOT MATCHED THEN INSERT *
+</code></pre>
+<p>Reprocess the same month ten times and the table is identical: matched rows update in place, new rows insert, duplicates never accumulate. This is the block most worth being able to explain out loud.</p>
+<hr />
+<h3 id="45-gold-notebook-04_gold_aggregates">4.5 🥇 Gold — notebook <code>04_gold_aggregates</code></h3>
+<p>Three tables, each answering a family of business questions. Built with <code>CREATE OR REPLACE TABLE</code> — a full recompute, which at this scale is simpler and safer than incremental logic (and Delta keeps every previous version anyway).</p>
+<table>
+<thead>
+<tr>
+<th>Table</th>
+<th>Grain</th>
+<th>Answers</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>daily_borough_revenue</code></td>
+<td>borough × day</td>
+<td>Where does revenue come from? How do boroughs compare on fare, tips, revenue per mile?</td>
+</tr>
+<tr>
+<td><code>hourly_demand</code></td>
+<td>weekday × hour</td>
+<td>When is demand highest? <strong>And how fast does traffic move?</strong> (<code>avg_mph</code> = a congestion index derived from taxi meters)</td>
+</tr>
+<tr>
+<td><code>zone_pair_flows</code></td>
+<td>origin × destination</td>
+<td>Which corridors matter? What are their economics?</td>
+</tr>
+</tbody>
+</table>
+<p><code>zone_pair_flows</code> joins <code>dim_zone</code> <strong>twice</strong> — once as origin, once as destination. That pattern has a name worth knowing: a <strong>role-playing dimension</strong>.</p>
+<hr />
+<h2 id="5-delta-lake-versioning-and-time-travel">5. Delta Lake — versioning and time travel</h2>
+<p>Every table in bronze, silver, and gold is a <strong>Delta table</strong>, not a plain Parquet folder. Delta keeps a transaction log alongside the data, which is what makes <code>MERGE</code>, <code>DELETE</code>, and ACID guarantees possible in the first place — and it has a second benefit:</p>
+<blockquote>
+<p><strong>Because the tables are Delta tables, every write and MERGE creates a new version, so I can inspect table history and query an older snapshot using <code>VERSION AS OF</code>.</strong></p>
+</blockquote>
+<pre><code class="language-sql">-- What has happened to this table, ever?
+DESCRIBE HISTORY workspace.tlc_silver.trips;
+
+-- Query the table as it was at version 0
+SELECT count(*) FROM workspace.tlc_silver.trips VERSION AS OF 0;
+
+-- Or as of a point in time
+SELECT * FROM workspace.tlc_gold.ticker_kpis TIMESTAMP AS OF '2026-08-16';
+</code></pre>
+<p>Why this matters in practice: it gives <strong>auditability</strong> (every write is logged with its operation type and row counts), <strong>debugging</strong> (compare today's table against yesterday's to find what a change did), and <strong>recovery</strong> (restore a table to a prior version after a bad load, instead of rebuilding it from scratch).</p>
+<div class="mermaid">flowchart LR
+    V0["v0<br/>CREATE TABLE"] --> V1["v1<br/>MERGE"] --> V2["v2<br/>MERGE"] --> V3["v3<br/>current"]
+    Q["SELECT … VERSION AS OF 1"] -.-> V1
+    classDef ver fill:#00618a,color:#fff,stroke:none
+    classDef q fill:#5b2c83,color:#fff,stroke:none
+    class V0,V1,V2,V3 ver
+    class Q q
+</div>
+<hr />
+<h2 id="6-serving-sql-and-the-dashboard">6. Serving — SQL and the dashboard</h2>
+<p>The gold layer exists so that answering a question takes one simple query:</p>
+<pre><code class="language-sql">-- Demand and congestion by hour
+SELECT pickup_hour, sum(trips) AS trips, round(avg(avg_mph), 1) AS avg_mph
+FROM workspace.tlc_gold.hourly_demand
+GROUP BY pickup_hour ORDER BY pickup_hour;
+</code></pre>
+<p>No joins, no window functions, no knowledge of how the data was cleaned — that work was already done, once, upstream. Two personas, two doors, one set of tables: engineers use notebooks, analysts use the <strong>SQL editor</strong> and the <strong>dashboard</strong>.</p>
+<p>Findings worth pointing at:</p>
+<ul>
+<li><strong>Manhattan dominates</strong> trip volume; airport zones drive the highest-value corridors.</li>
+<li><strong>Average speed inverts demand</strong> — slowest in late-afternoon rush, fastest pre-dawn. A traffic index, derived from taxi meters.</li>
+<li><strong>Tipping varies</strong> by borough and payment type.</li>
+</ul>
+<hr />
+<h2 id="7-incident-log-the-data-source-saga">7. Incident log — the data-source saga</h2>
+<p>The pipeline was built against two <em>other</em> data sources before NYC TLC. Nothing about the pipeline's <strong>shape</strong> ever changed — only a connection, an expression, and the config file.</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Source</th>
+<th>What happened</th>
+<th>Lesson</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><strong>stooq.com</strong> (stock CSVs)</td>
+<td>Deployed a JavaScript proof-of-work anti-bot challenge mid-build. ADF can't execute JS, so it faithfully landed HTML challenge pages. <strong>Every copy activity reported success.</strong></td>
+<td><strong>Validate landed content, not HTTP status.</strong> Green runs can still produce garbage.</td>
+</tr>
+<tr>
+<td>2</td>
+<td><strong>Alpha Vantage</strong> (stock API)</td>
+<td>Re-pointed everything, throttled politely… then the backfill returned <code>{"Information": "outputsize=full is a premium feature"}</code> with HTTP 200. Free tier = 100 days only.</td>
+<td>Verify a free tier's <strong>exact</strong> scope before designing on top of it.</td>
+</tr>
+<tr>
+<td>3</td>
+<td><strong>NYC TLC on CloudFront</strong> ✅</td>
+<td>Government open data on an industrial CDN: no key, no rate limits, no bot walls, columnar Parquet, ~3M rows/month.</td>
+<td><strong>Source selection is a reliability decision.</strong></td>
+</tr>
+<tr>
+<td>4</td>
+<td><strong>ADF publish error</strong></td>
+<td>Deleted a linked service <em>before</em> re-pointing the dataset that used it → orphaned reference → publish refused: <em>"Binary dataset … linkedService is required."</em></td>
+<td><strong>Repoint dependents first, delete connections last.</strong> Publish-time validation is the safety net.</td>
+</tr>
+<tr>
+<td>5</td>
+<td><strong>Azure Policy denial</strong></td>
+<td>The first storage account deployment was refused: <code>RequestDisallowedByAzure</code>. A student-subscription policy restricts regions. Found the allowed list in <strong>Policy → Assignments → Allowed resource deployment regions → Parameters</strong>, redeployed in West US 2.</td>
+<td>Policy denials are <strong>read</strong>, not fought. Also: resource-group region ≠ resource region.</td>
+</tr>
+</tbody>
+</table>
+<div class="mermaid">flowchart LR
+    A["stooq.com<br/>❌ JS anti-bot wall"] --> B["Alpha Vantage<br/>❌ history paywalled"] --> C["NYC TLC CDN<br/>✅ 40M rows, open data"]
+    classDef bad fill:#a33,color:#fff,stroke:none
+    classDef good fill:#1f6f43,color:#fff,stroke:none
+    class A,B bad
+    class C good
+</div>
+<hr />
+<h2 id="8-runbook-operating-it">8. Runbook — operating it</h2>
+<p><strong>Run the ingestion:</strong> ADF Studio → Author → <code>pl_ingest_tlc_monthly</code> → <strong>Debug</strong> → accept <code>service_type = yellow</code>. ~2–5 minutes. Safe to re-run (same paths get overwritten).</p>
+<p><strong>Add a new month:</strong> TLC publishes with a ~2-month lag. Append <code>{"month": "2026-06"}</code> to <code>months.json</code>, re-upload, run the pipeline, then re-run notebooks <code>02</code> → <code>04</code>. Silver's MERGE absorbs any overlap.</p>
+<p><strong>Ingest green taxis:</strong> run with <code>service_type = green</code>. Same pipeline, parallel folder tree — that parameter earning its keep.</p>
+<p><strong>Debug a copy activity:</strong> Output tab → hover the row → <strong>input</strong> icon shows the <em>resolved</em> URL for that iteration (expression debugging) → <strong>glasses</strong> icon shows bytes read/written.</p>
+<p><strong>Refresh the lakehouse:</strong> notebooks <code>01</code> → <code>02</code> → <code>03</code> → <code>04</code>, in order. Notebook <code>01</code> needs a fresh SAS token if the old one expired.</p>
+<p><strong>Cost safety:</strong> the schedule trigger exists but stays <strong>Stopped</strong>. Storage is ~700 MB ≈ pennies. Full teardown = delete the resource group <code>rg-medallion-demo</code> (one action) — the Databricks half survives permanently at $0.</p>
+<hr />
+<h2 id="9-interview-sound-bites">9. Interview sound bites</h2>
+<ul>
+<li><em>"ADF only moves bytes — the raw zone is byte-for-byte and date-partitioned. Nothing parses data before bronze, so I can always replay."</em></li>
+<li><em>"The pipeline is metadata-driven: changing scope is a config-file edit, not a deployment."</em></li>
+<li><em>"TLC trips have no natural key, so silver builds a SHA-256 surrogate key and MERGEs on it — reprocessing a month is idempotent by construction."</em></li>
+<li><em>"Bad rows aren't dropped, they're quarantined with the rule they violated, so data quality is a queryable metric rather than a vague claim."</em></li>
+<li><em>"Because the tables are Delta, every write and MERGE creates a new version — I can inspect table history and query an older snapshot with VERSION AS OF."</em></li>
+<li><em>"All thirty copy activities were green and the data was still garbage — that's why I validate landed content, not HTTP status codes."</em></li>
+<li><em>"Free Edition is serverless-only, so I bridged storage with a scoped read-only SAS into a Unity Catalog Volume. On a paid workspace I'd register an external location and read abfss:// in place."</em></li>
+</ul>
+<hr />
+<h2 id="10-glossary">10. Glossary</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>ADLS Gen2</strong></td>
+<td>Azure Data Lake Storage Gen2 — blob storage with a hierarchical namespace (real directories)</td>
+</tr>
+<tr>
+<td><strong>Hierarchical namespace</strong></td>
+<td>The setting that turns blob storage into a data lake. Creation-time only.</td>
+</tr>
+<tr>
+<td><strong>Linked service</strong></td>
+<td>An ADF connection definition: how to reach a system, with what credentials</td>
+</tr>
+<tr>
+<td><strong>Dataset</strong></td>
+<td>An ADF pointer to specific data on a connection; may carry parameters</td>
+</tr>
+<tr>
+<td><strong>Activity</strong></td>
+<td>One unit of work in a pipeline (Lookup, ForEach, Copy…)</td>
+</tr>
+<tr>
+<td><strong>Metadata-driven</strong></td>
+<td>The pipeline holds logic; a config file holds scope</td>
+</tr>
+<tr>
+<td><strong>Raw zone</strong></td>
+<td>Immutable, as-received storage — the replay point of the platform</td>
+</tr>
+<tr>
+<td><strong>Hive-style partitioning</strong></td>
+<td>Encoding a column in the folder name (<code>month=2025-01</code>) so engines read it as data</td>
+</tr>
+<tr>
+<td><strong>Medallion architecture</strong></td>
+<td>Bronze (raw) → Silver (clean) → Gold (aggregated) layering</td>
+</tr>
+<tr>
+<td><strong>Delta Lake</strong></td>
+<td>Storage format adding ACID transactions, MERGE/DELETE, and versioning to Parquet</td>
+</tr>
+<tr>
+<td><strong>MERGE / upsert</strong></td>
+<td>Update matching rows, insert new ones — in one atomic operation</td>
+</tr>
+<tr>
+<td><strong>Idempotency</strong></td>
+<td>Running the same job repeatedly leaves the same end state</td>
+</tr>
+<tr>
+<td><strong>Surrogate key</strong></td>
+<td>An engineered identifier when the source has no natural one</td>
+</tr>
+<tr>
+<td><strong>Quarantine table</strong></td>
+<td>Where rows that fail validation are stored with the reason</td>
+</tr>
+<tr>
+<td><strong>Dimension</strong></td>
+<td>Reference data giving facts their meaning (zone → borough)</td>
+</tr>
+<tr>
+<td><strong>Role-playing dimension</strong></td>
+<td>The same dimension joined twice in different roles (origin, destination)</td>
+</tr>
+<tr>
+<td><strong>SAS token</strong></td>
+<td>Shared Access Signature — a scoped, expiring storage credential</td>
+</tr>
+<tr>
+<td><strong>Unity Catalog Volume</strong></td>
+<td>Governed file storage in Databricks, readable like a local path</td>
+</tr>
+<tr>
+<td><strong>Time travel</strong></td>
+<td>Querying a previous version of a Delta table (<code>VERSION AS OF</code>)</td>
+</tr>
+</tbody>
+</table>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js"></script>
+<script>
+  const dark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: dark ? 'dark' : 'default',
+    themeVariables: { fontFamily: 'inherit', fontSize: '14px' },
+    flowchart: { curve: 'basis', padding: 12 }
+  });
+</script>
+</body>
+</html>

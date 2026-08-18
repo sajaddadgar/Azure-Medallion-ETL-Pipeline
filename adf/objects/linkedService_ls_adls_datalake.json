@@ -1,0 +1,12 @@
+{
+    "name": "ls_adls_datalake",
+    "type": "Microsoft.DataFactory/factories/linkedservices",
+    "properties": {
+        "annotations": [],
+        "type": "AzureBlobFS",
+        "typeProperties": {
+            "url": "https://stmedallionsajad01.dfs.core.windows.net/",
+            "encryptedCredential": "<SET-IN-ADF-STUDIO>"
+        }
+    }
+}

@@ -1,0 +1,1 @@
+DESCRIBE HISTORY workspace.tlc_silver.trips;

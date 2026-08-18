@@ -1,0 +1,24 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2015-01-01/deploymentParameters.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "factoryName": {
+            "value": "adf-medallion-sajad01"
+        },
+        "ls_adls_datalake_accountKey": {
+            "value": ""
+        },
+        "ls_adls_datalake_properties_typeProperties_url": {
+            "value": "https://stmedallionsajad01.dfs.core.windows.net/"
+        },
+        "ls_http_nyctlc_properties_typeProperties_url": {
+            "value": "https://d37ci6vzurychx.cloudfront.net"
+        },
+        "containerUri": {
+            "value": ""
+        },
+        "containerSasToken": {
+            "value": ""
+        }
+    }
+}

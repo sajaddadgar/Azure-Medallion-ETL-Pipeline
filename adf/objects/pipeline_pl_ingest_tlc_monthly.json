@@ -1,0 +1,186 @@
+{
+    "name": "pl_ingest_tlc_monthly",
+    "properties": {
+        "activities": [
+            {
+                "name": "lkp_months",
+                "type": "Lookup",
+                "dependsOn": [],
+                "policy": {
+                    "timeout": "0.5:00:00",
+                    "retry": 2,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "source": {
+                        "type": "JsonSource",
+                        "storeSettings": {
+                            "type": "AzureBlobFSReadSettings",
+                            "recursive": true,
+                            "enablePartitionDiscovery": false
+                        },
+                        "formatSettings": {
+                            "type": "JsonReadSettings"
+                        }
+                    },
+                    "dataset": {
+                        "referenceName": "ds_adls_months_config",
+                        "type": "DatasetReference"
+                    },
+                    "firstRowOnly": false
+                }
+            },
+            {
+                "name": "fe_download_tickers",
+                "type": "ForEach",
+                "dependsOn": [
+                    {
+                        "activity": "lkp_months",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "userProperties": [],
+                "typeProperties": {
+                    "items": {
+                        "value": "@activity('lkp_months').output.value",
+                        "type": "Expression"
+                    },
+                    "isSequential": false,
+                    "batchCount": 8,
+                    "activities": [
+                        {
+                            "name": "cp_tlc_to_raw",
+                            "type": "Copy",
+                            "dependsOn": [],
+                            "policy": {
+                                "timeout": "0.10:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [
+                                {
+                                    "name": "month",
+                                    "value": "@{item().month}"
+                                }
+                            ],
+                            "typeProperties": {
+                                "source": {
+                                    "type": "BinarySource",
+                                    "storeSettings": {
+                                        "type": "HttpReadSettings",
+                                        "requestMethod": "GET"
+                                    },
+                                    "formatSettings": {
+                                        "type": "BinaryReadSettings"
+                                    }
+                                },
+                                "sink": {
+                                    "type": "BinarySink",
+                                    "storeSettings": {
+                                        "type": "AzureBlobFSWriteSettings"
+                                    }
+                                },
+                                "enableStaging": false
+                            },
+                            "inputs": [
+                                {
+                                    "referenceName": "ds_http_tlc_bin",
+                                    "type": "DatasetReference",
+                                    "parameters": {
+                                        "relativeUrl": {
+                                            "value": "@concat('/trip-data/', pipeline().parameters.service_type, '_tripdata_', item().month, '.parquet')",
+                                            "type": "Expression"
+                                        }
+                                    }
+                                }
+                            ],
+                            "outputs": [
+                                {
+                                    "referenceName": "ds_adls_raw_bin",
+                                    "type": "DatasetReference",
+                                    "parameters": {
+                                        "folderPath": {
+                                            "value": "@concat('raw/tlc/', pipeline().parameters.service_type, '/month=', item().month)",
+                                            "type": "Expression"
+                                        },
+                                        "fileName": {
+                                            "value": "@concat(pipeline().parameters.service_type, '_tripdata_', item().month, '.parquet')",
+                                            "type": "Expression"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    ]
+                }
+            },
+            {
+                "name": "cp_zone_lookup",
+                "type": "Copy",
+                "dependsOn": [],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "source": {
+                        "type": "BinarySource",
+                        "storeSettings": {
+                            "type": "HttpReadSettings",
+                            "requestMethod": "GET"
+                        },
+                        "formatSettings": {
+                            "type": "BinaryReadSettings"
+                        }
+                    },
+                    "sink": {
+                        "type": "BinarySink",
+                        "storeSettings": {
+                            "type": "AzureBlobFSWriteSettings"
+                        }
+                    },
+                    "enableStaging": false
+                },
+                "inputs": [
+                    {
+                        "referenceName": "ds_http_tlc_bin",
+                        "type": "DatasetReference",
+                        "parameters": {
+                            "relativeUrl": "/misc/taxi_zone_lookup.csv"
+                        }
+                    }
+                ],
+                "outputs": [
+                    {
+                        "referenceName": "ds_adls_raw_bin",
+                        "type": "DatasetReference",
+                        "parameters": {
+                            "folderPath": "raw/tlc/reference",
+                            "fileName": "taxi_zone_lookup.csv"
+                        }
+                    }
+                ]
+            }
+        ],
+        "parameters": {
+            "service_type": {
+                "type": "string",
+                "defaultValue": "yellow"
+            }
+        },
+        "annotations": [],
+        "lastPublishTime": "2026-08-16T20:41:59Z"
+    },
+    "type": "Microsoft.DataFactory/factories/pipelines"
+}

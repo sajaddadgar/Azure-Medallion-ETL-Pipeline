@@ -1,0 +1,31 @@
+{
+    "name": "ds_adls_months_config",
+    "properties": {
+        "linkedServiceName": {
+            "referenceName": "ls_adls_datalake",
+            "type": "LinkedServiceReference"
+        },
+        "annotations": [],
+        "type": "Json",
+        "typeProperties": {
+            "location": {
+                "type": "AzureBlobFSLocation",
+                "fileName": "months.json",
+                "folderPath": "config",
+                "fileSystem": "datalake"
+            }
+        },
+        "schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {
+                    "type": "string"
+                },
+                "stooq_symbol": {
+                    "type": "string"
+                }
+            }
+        }
+    },
+    "type": "Microsoft.DataFactory/factories/datasets"
+}
