@@ -14,7 +14,7 @@ End-to-end cloud data engineering project: **~40 million NYC taxi trips** ingest
 
 | | |
 |---|---|
-| **Source** | [NYC TLC Trip Record Data](https://www.nyc.gov/site/tlc/about/tlc-trip-record-data.page) — official open data, Parquet, served over CloudFront |
+| **Source** | [NYC TLC Trip Record Data](https://www.nyc.gov/site/tlc/about/tlc-trip-record-data.page) — official open data |
 | **Volume** | 12 monthly files (2025), ~55 MB each → **~40M trip records** |
 | **Ingestion** | Metadata-driven ADF pipeline: `Lookup → ForEach (8 parallel) → Copy` |
 | **Storage** | ADLS Gen2, date-partitioned immutable raw zone |
